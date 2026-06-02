@@ -107,6 +107,96 @@ ORACLE_POOL_INCREMENT=1
 
 **注意**：如果 Oracle Instant Client 没有添加到系统 PATH，需要通过 `ORACLE_CLIENT_PATH` 环境变量指定路径。
 
+## 权限配置
+
+MCP 服务器支持细粒度的操作权限控制，默认全部为只读模式。
+
+### 权限说明
+
+| 环境变量 | 默认值 | 控制范围 |
+|---------|--------|---------|
+| `ORACLE_ALLOW_INSERT` | `false` | INSERT 操作、批量插入 (`oracle_batch_insert`) |
+| `ORACLE_ALLOW_UPDATE` | `false` | UPDATE 操作 |
+| `ORACLE_ALLOW_DELETE` | `false` | DELETE 操作 |
+
+### 权限依赖关系
+
+- **DDL 操作**（CREATE/ALTER/DROP/TRUNCATE）：需要 `INSERT` + `UPDATE` + `DELETE` 全部为 `true`
+- **存储过程**（`oracle_procedure`）：需要至少一项写权限（INSERT/UPDATE/DELETE）
+- **事务**（`oracle_begin_transaction` 等）：需要至少一项写权限
+- **SELECT 查询**：始终允许，不受权限控制
+
+### 智能 SQL 识别
+
+`oracle_execute` 和 `oracle_batch_execute` 会根据 SQL 语句自动识别操作类型：
+
+```sql
+INSERT INTO ...      → 需要 ORACLE_ALLOW_INSERT=true
+UPDATE ... SET       → 需要 ORACLE_ALLOW_UPDATE=true
+DELETE FROM ...      → 需要 ORACLE_ALLOW_DELETE=true
+CREATE/ALTER/DROP    → 需要三项全部为 true
+SELECT ...           → 始终允许
+```
+
+### 配置示例
+
+**只读模式（默认）**：
+```json
+{
+  "mcpServers": {
+    "oracle": {
+      "command": "node",
+      "args": ["/path/to/oracle-mcp/dist/index.js"],
+      "env": {
+        "ORACLE_USER": "your_username",
+        "ORACLE_PASSWORD": "your_password",
+        "ORACLE_CONNECT_STRING": "localhost:1521/ORCL"
+      }
+    }
+  }
+}
+```
+
+**允许 INSERT 和 UPDATE，禁止 DELETE**：
+```json
+{
+  "mcpServers": {
+    "oracle": {
+      "command": "node",
+      "args": ["/path/to/oracle-mcp/dist/index.js"],
+      "env": {
+        "ORACLE_USER": "your_username",
+        "ORACLE_PASSWORD": "your_password",
+        "ORACLE_CONNECT_STRING": "localhost:1521/ORCL",
+        "ORACLE_ALLOW_INSERT": "true",
+        "ORACLE_ALLOW_UPDATE": "true",
+        "ORACLE_ALLOW_DELETE": "false"
+      }
+    }
+  }
+}
+```
+
+**完全读写权限**：
+```json
+{
+  "mcpServers": {
+    "oracle": {
+      "command": "node",
+      "args": ["/path/to/oracle-mcp/dist/index.js"],
+      "env": {
+        "ORACLE_USER": "your_username",
+        "ORACLE_PASSWORD": "your_password",
+        "ORACLE_CONNECT_STRING": "localhost:1521/ORCL",
+        "ORACLE_ALLOW_INSERT": "true",
+        "ORACLE_ALLOW_UPDATE": "true",
+        "ORACLE_ALLOW_DELETE": "true"
+      }
+    }
+  }
+}
+```
+
 ## 工具说明
 
 ### 1. oracle_query - SQL 查询

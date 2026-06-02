@@ -221,18 +221,20 @@ export async function getTableSchema(args: GetTableSchemaArgs): Promise<{
       comments: row.COMMENTS || undefined,
     }));
 
-    // 获取约束信息
+    // 获取约束信息（修复：外键引用表名需要通过 r_constraint_name 连接获取）
     const constraintsSql = owner
       ? `SELECT c.constraint_name, c.constraint_type, c.search_condition,
-                cc.column_name, c.r_owner, c.r_table_name, c.r_constraint_name
+                cc.column_name, c.r_owner, r.table_name as r_table_name, c.r_constraint_name
          FROM all_constraints c
          LEFT JOIN all_cons_columns cc ON c.owner = cc.owner AND c.constraint_name = cc.constraint_name
+         LEFT JOIN all_constraints r ON c.r_owner = r.owner AND c.r_constraint_name = r.constraint_name
          WHERE c.owner = :1 AND c.table_name = :2
          ORDER BY c.constraint_name, cc.position`
       : `SELECT c.constraint_name, c.constraint_type, c.search_condition,
-                cc.column_name, c.r_owner, c.r_table_name, c.r_constraint_name
+                cc.column_name, c.r_owner, r.table_name as r_table_name, c.r_constraint_name
          FROM user_constraints c
          LEFT JOIN user_cons_columns cc ON c.constraint_name = cc.constraint_name
+         LEFT JOIN user_constraints r ON c.r_constraint_name = r.constraint_name
          WHERE c.table_name = :1
          ORDER BY c.constraint_name, cc.position`;
 
