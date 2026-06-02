@@ -70,8 +70,8 @@ export const procedureTool = {
  * @param type 类型字符串
  * @returns Oracle 数据类型常量
  */
-function getOracleType(type?: string): number {
-  if (!type) return oracledb.STRING;
+function getOracleType(type?: string): oracledb.DbType {
+  if (!type) return oracledb.DB_TYPE_VARCHAR;
   
   const upperType = type.toUpperCase();
   switch (upperType) {
@@ -79,21 +79,21 @@ function getOracleType(type?: string): number {
     case 'NUMERIC':
     case 'INTEGER':
     case 'INT':
-      return oracledb.NUMBER;
+      return oracledb.DB_TYPE_NUMBER;
     case 'DATE':
     case 'TIMESTAMP':
-      return oracledb.DATE;
+      return oracledb.DB_TYPE_TIMESTAMP;
     case 'CURSOR':
     case 'REF CURSOR':
-      return oracledb.CURSOR;
+      return oracledb.DB_TYPE_CURSOR;
     case 'CLOB':
-      return oracledb.CLOB;
+      return oracledb.DB_TYPE_CLOB;
     case 'BLOB':
-      return oracledb.BLOB;
+      return oracledb.DB_TYPE_BLOB;
     case 'BUFFER':
-      return oracledb.BUFFER;
+      return oracledb.DB_TYPE_RAW;
     default:
-      return oracledb.STRING;
+      return oracledb.DB_TYPE_VARCHAR;
   }
 }
 
@@ -142,7 +142,7 @@ export async function callProcedure(args: ProcedureArgs): Promise<ProcedureResul
 
     // 如果有游标返回，添加一个游标输出参数
     if (hasCursor) {
-      binds['cursor'] = { dir: oracledb.BIND_OUT, type: oracledb.CURSOR };
+      binds['cursor'] = { dir: oracledb.BIND_OUT, type: oracledb.DB_TYPE_CURSOR };
       outParams.push('cursor');
     }
 

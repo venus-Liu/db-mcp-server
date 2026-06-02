@@ -5,8 +5,13 @@
 
 import oracledb from 'oracledb';
 
-// 初始化 Oracle 客户端
-oracledb.initOracleClient();
+// 初始化 Oracle 客户端（支持自定义路径）
+const oracleClientPath = process.env.ORACLE_CLIENT_PATH;
+if (oracleClientPath) {
+  oracledb.initOracleClient({ libDir: oracleClientPath });
+} else {
+  oracledb.initOracleClient();
+}
 
 /**
  * Oracle 连接配置接口
@@ -18,6 +23,30 @@ export interface OracleConfig {
   poolMin?: number;
   poolMax?: number;
   poolIncrement?: number;
+}
+
+/**
+ * MCP 安全配置接口
+ */
+export interface McpSecurityConfig {
+  /** 是否允许 INSERT 操作，默认 false */
+  allowInsert: boolean;
+  /** 是否允许 UPDATE 操作，默认 false */
+  allowUpdate: boolean;
+  /** 是否允许 DELETE 操作，默认 false */
+  allowDelete: boolean;
+}
+
+/**
+ * 获取安全配置
+ * @returns McpSecurityConfig 安全配置对象
+ */
+export function getSecurityConfig(): McpSecurityConfig {
+  return {
+    allowInsert: process.env.ORACLE_ALLOW_INSERT === 'true',
+    allowUpdate: process.env.ORACLE_ALLOW_UPDATE === 'true',
+    allowDelete: process.env.ORACLE_ALLOW_DELETE === 'true',
+  };
 }
 
 /**

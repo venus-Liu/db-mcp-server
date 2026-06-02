@@ -24,8 +24,9 @@
 #### Windows
 
 1. 下载 Oracle Instant Client Basic 包：https://www.oracle.com/database/technologies/instant-client/downloads.html
-2. 解压到 `C:\oracle\instantclient_19_22`
-3. 添加 `C:\oracle\instantclient_19_22` 到系统 PATH
+2. 解压到任意目录，例如 `C:\oracle\instantclient_19_22`
+3. **方式一**：添加到系统 PATH（可选）
+4. **方式二**：在 MCP 配置中指定路径（推荐，见下方配置）
 
 #### macOS
 
@@ -74,6 +75,9 @@ ORACLE_USER=your_username
 ORACLE_PASSWORD=your_password
 ORACLE_CONNECT_STRING=localhost:1521/ORCL
 
+# 可选：指定 Oracle Instant Client 路径（不添加到系统 PATH 时使用）
+ORACLE_CLIENT_PATH=C:\oracle\instantclient_19_22
+
 # 可选：连接池配置
 ORACLE_POOL_MIN=2
 ORACLE_POOL_MAX=10
@@ -93,12 +97,15 @@ ORACLE_POOL_INCREMENT=1
       "env": {
         "ORACLE_USER": "your_username",
         "ORACLE_PASSWORD": "your_password",
-        "ORACLE_CONNECT_STRING": "localhost:1521/ORCL"
+        "ORACLE_CONNECT_STRING": "localhost:1521/ORCL",
+        "ORACLE_CLIENT_PATH": "C:\\oracle\\instantclient_19_22"
       }
     }
   }
 }
 ```
+
+**注意**：如果 Oracle Instant Client 没有添加到系统 PATH，需要通过 `ORACLE_CLIENT_PATH` 环境变量指定路径。
 
 ## 工具说明
 
@@ -342,7 +349,19 @@ npm start
 
 ### DPI-1047: Cannot locate a 64-bit Oracle Client library
 
-确保 Oracle Instant Client 已正确安装并添加到系统 PATH。
+确保 Oracle Instant Client 已正确安装，并通过以下方式之一配置：
+
+**方式一**：添加到系统 PATH
+```powershell
+[Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";C:\oracle\instantclient_19_22", "Machine")
+```
+
+**方式二**：在 MCP 配置中指定路径（推荐）
+```json
+"env": {
+  "ORACLE_CLIENT_PATH": "C:\\oracle\\instantclient_19_22"
+}
+```
 
 ### 连接超时
 

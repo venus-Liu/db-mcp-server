@@ -60,12 +60,10 @@ export async function executeDML(args: ExecuteArgs): Promise<ExecuteResult> {
   try {
     connection = await getConnection();
     
-    // 设置自动提交
-    connection.autoCommit = autoCommit;
-    
     const result = await connection.execute(
       sql,
-      params as SqlParameter[]
+      params as SqlParameter[],
+      { autoCommit }
     );
 
     return {

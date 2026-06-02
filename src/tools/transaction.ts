@@ -135,9 +135,6 @@ export async function beginTransaction(args: BeginTransactionArgs): Promise<{ tr
   }
 
   const connection = await getConnection();
-  
-  // 禁用自动提交
-  connection.autoCommit = false;
 
   const transaction: Transaction = {
     id: transactionId,

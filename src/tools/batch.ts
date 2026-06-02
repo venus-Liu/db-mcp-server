@@ -126,7 +126,6 @@ export async function batchExecute(args: BatchExecuteArgs): Promise<BatchResult>
 
   try {
     connection = await getConnection();
-    connection.autoCommit = autoCommit;
 
     // 分批处理
     for (let i = 0; i < paramsList.length; i += batchSize) {
@@ -136,9 +135,7 @@ export async function batchExecute(args: BatchExecuteArgs): Promise<BatchResult>
         const batchResult = await connection.executeMany(
           sql,
           batch as SqlParameter[][],
-          {
-            autoCommit: false, // 每批不自动提交，最后统一提交
-          }
+          { autoCommit }
         );
         
         result.successCount += batchResult.rowsAffected || batch.length;
@@ -146,7 +143,7 @@ export async function batchExecute(args: BatchExecuteArgs): Promise<BatchResult>
         // 如果批量执行失败，尝试逐条执行以识别具体错误
         for (let j = 0; j < batch.length; j++) {
           try {
-            await connection.execute(sql, batch[j] as SqlParameter[]);
+            await connection.execute(sql, batch[j] as SqlParameter[], { autoCommit });
             result.successCount++;
           } catch (itemError) {
             result.errorCount++;
@@ -157,11 +154,6 @@ export async function batchExecute(args: BatchExecuteArgs): Promise<BatchResult>
           }
         }
       }
-    }
-
-    // 如果没有自动提交，手动提交
-    if (!autoCommit) {
-      await connection.commit();
     }
 
     return result;

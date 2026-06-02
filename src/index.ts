@@ -10,7 +10,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { initializePool, closePool, getPoolStatus } from './db.js';
-import { getConfigFromEnv } from './config.js';
+import { getConfigFromEnv, getSecurityConfig } from './config.js';
 import {
   // 工具定义
   queryTool,
@@ -50,24 +50,99 @@ const server = new Server(
 );
 
 /**
+ * 工具所需权限类型
+ */
+type Permission = 'read' | 'insert' | 'update' | 'delete' | 'ddl' | 'procedure' | 'transaction';
+
+/**
+ * 工具权限映射：每个工具需要哪种权限才能执行
+ */
+const TOOL_PERMISSIONS: Record<string, Permission> = {
+  oracle_query: 'read',
+  oracle_list_tables: 'read',
+  oracle_get_table_schema: 'read',
+  oracle_execute: 'ddl',          // 需要在运行时根据 SQL 类型判断
+  oracle_procedure: 'procedure',
+  oracle_begin_transaction: 'transaction',
+  oracle_commit_transaction: 'transaction',
+  oracle_rollback_transaction: 'transaction',
+  oracle_transaction_execute: 'transaction',
+  oracle_batch_execute: 'ddl',    // 需要在运行时根据 SQL 类型判断
+  oracle_batch_insert: 'insert',
+};
+
+/**
+ * 从 SQL 语句推断操作类型
+ */
+function inferSqlType(sql: string): 'insert' | 'update' | 'delete' | 'ddl' | 'other' {
+  const trimmed = sql.trim().toUpperCase();
+  if (trimmed.startsWith('INSERT')) return 'insert';
+  if (trimmed.startsWith('UPDATE')) return 'update';
+  if (trimmed.startsWith('DELETE')) return 'delete';
+  if (trimmed.startsWith('CREATE') || trimmed.startsWith('ALTER') || trimmed.startsWith('DROP') || trimmed.startsWith('TRUNCATE')) return 'ddl';
+  return 'other';
+}
+
+/**
+ * 检查权限是否被允许
+ */
+function checkPermission(perm: Permission, security: ReturnType<typeof getSecurityConfig>): boolean {
+  switch (perm) {
+    case 'read': return true;
+    case 'insert': return security.allowInsert;
+    case 'update': return security.allowUpdate;
+    case 'delete': return security.allowDelete;
+    case 'ddl': return security.allowInsert && security.allowUpdate && security.allowDelete;
+    case 'procedure': return security.allowInsert || security.allowUpdate || security.allowDelete;
+    case 'transaction': return security.allowInsert || security.allowUpdate || security.allowDelete;
+    default: return false;
+  }
+}
+
+/**
+ * 获取权限描述
+ */
+function getPermissionLabel(perm: Permission): string {
+  const labels: Record<Permission, string> = {
+    read: '读取',
+    insert: 'INSERT',
+    update: 'UPDATE',
+    delete: 'DELETE',
+    ddl: 'DDL',
+    procedure: '存储过程',
+    transaction: '事务',
+  };
+  return labels[perm];
+}
+
+/**
  * 注册工具列表处理器
  */
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  return {
-    tools: [
-      queryTool,
-      executeTool,
-      procedureTool,
-      transactionTools.begin,
-      transactionTools.commit,
-      transactionTools.rollback,
-      transactionTools.execute,
-      batchTools.execute,
-      batchTools.insert,
-      schemaTools.listTables,
-      schemaTools.getTableSchema,
-    ],
-  };
+  const security = getSecurityConfig();
+
+  const allTools = [
+    queryTool,
+    executeTool,
+    procedureTool,
+    transactionTools.begin,
+    transactionTools.commit,
+    transactionTools.rollback,
+    transactionTools.execute,
+    batchTools.execute,
+    batchTools.insert,
+    schemaTools.listTables,
+    schemaTools.getTableSchema,
+  ];
+
+  // 根据权限过滤工具
+  const tools = allTools.filter(t => {
+    const perm = TOOL_PERMISSIONS[t.name];
+    if (!perm) return true;
+    return checkPermission(perm, security);
+  });
+
+  return { tools };
 });
 
 /**
@@ -75,6 +150,44 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
  */
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+
+  // 安全校验
+  const perm = TOOL_PERMISSIONS[name];
+  if (perm && perm !== 'read') {
+    const security = getSecurityConfig();
+
+    // oracle_execute 和 oracle_batch_execute 需要根据 SQL 类型动态判断
+    if (name === 'oracle_execute' || name === 'oracle_batch_execute') {
+      const sql = (args as { sql: string }).sql;
+      const sqlType = inferSqlType(sql);
+      if (sqlType === 'insert' && !security.allowInsert) {
+        return { content: [{ type: 'text', text: `错误: 当前禁止 INSERT 操作。如需启用，请设置 ORACLE_ALLOW_INSERT=true` }], isError: true };
+      }
+      if (sqlType === 'update' && !security.allowUpdate) {
+        return { content: [{ type: 'text', text: `错误: 当前禁止 UPDATE 操作。如需启用，请设置 ORACLE_ALLOW_UPDATE=true` }], isError: true };
+      }
+      if (sqlType === 'delete' && !security.allowDelete) {
+        return { content: [{ type: 'text', text: `错误: 当前禁止 DELETE 操作。如需启用，请设置 ORACLE_ALLOW_DELETE=true` }], isError: true };
+      }
+      if (sqlType === 'ddl' && !(security.allowInsert && security.allowUpdate && security.allowDelete)) {
+        return { content: [{ type: 'text', text: `错误: 当前禁止 DDL 操作（CREATE/ALTER/DROP/TRUNCATE）。如需启用，请同时设置 ORACLE_ALLOW_INSERT、ORACLE_ALLOW_UPDATE、ORACLE_ALLOW_DELETE=true` }], isError: true };
+      }
+    } else if (!checkPermission(perm, security)) {
+      return {
+        content: [{
+          type: 'text',
+          text: `错误: 当前禁止${getPermissionLabel(perm)}操作（${name}）。` +
+            (perm === 'insert' ? '请设置 ORACLE_ALLOW_INSERT=true' :
+             perm === 'update' ? '请设置 ORACLE_ALLOW_UPDATE=true' :
+             perm === 'delete' ? '请设置 ORACLE_ALLOW_DELETE=true' :
+             perm === 'procedure' ? '请至少设置一项写权限（ORACLE_ALLOW_INSERT/UPDATE/DELETE=true）' :
+             perm === 'transaction' ? '请至少设置一项写权限（ORACLE_ALLOW_INSERT/UPDATE/DELETE=true）' :
+             ''),
+        }],
+        isError: true,
+      };
+    }
+  }
 
   try {
     switch (name) {
@@ -247,7 +360,12 @@ async function main() {
     
     // 连接服务器
     await server.connect(transport);
-    console.error('[Oracle MCP] 服务器已启动，等待连接...');
+    const security = getSecurityConfig();
+    const perms: string[] = ['读取'];
+    if (security.allowInsert) perms.push('INSERT');
+    if (security.allowUpdate) perms.push('UPDATE');
+    if (security.allowDelete) perms.push('DELETE');
+    console.error(`[Oracle MCP] 服务器已启动，权限: ${perms.join(' / ')}`);
 
     // 处理进程退出
     process.on('SIGINT', async () => {
