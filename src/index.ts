@@ -1,391 +1,308 @@
 /**
- * Oracle MCP 服务器主入口
- * 实现 Model Context Protocol 服务器，提供 Oracle 数据库操作能力
+ * 数据库 MCP 服务器主入口
+ * 支持 Oracle / MySQL / PostgreSQL / SQL Server / SQLite
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import { initializePool, closePool, getPoolStatus } from './db.js';
-import { getConfigFromEnv, getSecurityConfig } from './config.js';
-import {
-  // 工具定义
-  queryTool,
-  executeTool,
-  procedureTool,
-  transactionTools,
-  batchTools,
-  schemaTools,
-  // 工具实现
-  executeQuery,
-  executeDML,
-  callProcedure,
-  beginTransaction,
-  commitTransaction,
-  rollbackTransaction,
-  executeInTransaction,
-  cleanupTransactions,
-  batchExecute,
-  batchInsert,
-  listTables,
-  getTableSchema,
-} from './tools/index.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { getConfig, getSecurityConfig, getDbType } from './config.js';
+import { createAdapter, getSupportedDatabases } from './adapters/index.js';
+import type { DatabaseAdapter, SqlParameter } from './adapters/types.js';
+
+// 全局适配器实例
+let adapter: DatabaseAdapter | null = null;
+
+// 活跃事务
+const activeTransactions = new Map<string, { connection: unknown; startTime: Date }>();
 
 /**
  * 创建 MCP 服务器
  */
 const server = new Server(
-  {
-    name: 'oracle-mcp-server',
-    version: '1.0.0',
-  },
-  {
-    capabilities: {
-      tools: {},
-    },
-  }
+  { name: 'db-mcp-server', version: '2.0.0' },
+  { capabilities: { tools: {} } },
 );
 
-/**
- * 工具所需权限类型
- */
-type Permission = 'read' | 'insert' | 'update' | 'delete' | 'ddl' | 'procedure' | 'transaction';
+// ==================== 工具定义 ====================
 
-/**
- * 工具权限映射：每个工具需要哪种权限才能执行
- */
-const TOOL_PERMISSIONS: Record<string, Permission> = {
-  oracle_query: 'read',
-  oracle_list_tables: 'read',
-  oracle_get_table_schema: 'read',
-  oracle_execute: 'ddl',          // 需要在运行时根据 SQL 类型判断
-  oracle_procedure: 'procedure',
-  oracle_begin_transaction: 'transaction',
-  oracle_commit_transaction: 'transaction',
-  oracle_rollback_transaction: 'transaction',
-  oracle_transaction_execute: 'transaction',
-  oracle_batch_execute: 'ddl',    // 需要在运行时根据 SQL 类型判断
-  oracle_batch_insert: 'insert',
+const tools = [
+  {
+    name: 'db_query',
+    description: '执行 SQL 查询语句并返回结果',
+    inputSchema: {
+      type: 'object', properties: {
+        sql: { type: 'string', description: 'SQL 查询语句' },
+        params: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] }, description: '查询参数数组' },
+        maxRows: { type: 'number', description: '最大返回行数' },
+      }, required: ['sql'],
+    },
+  },
+  {
+    name: 'db_execute',
+    description: '执行 DML 语句（INSERT/UPDATE/DELETE）',
+    inputSchema: {
+      type: 'object', properties: {
+        sql: { type: 'string', description: 'SQL 语句' },
+        params: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
+        autoCommit: { type: 'boolean', description: '是否自动提交，默认 true' },
+      }, required: ['sql'],
+    },
+  },
+  {
+    name: 'db_procedure',
+    description: '调用存储过程或函数',
+    inputSchema: {
+      type: 'object', properties: {
+        name: { type: 'string', description: '存储过程或函数名称' },
+        params: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, direction: { type: 'string', enum: ['IN', 'OUT', 'IN OUT'] }, type: { type: 'string' }, value: { type: ['string', 'number', 'boolean', 'null'] } }, required: ['name', 'direction'] } },
+        hasCursor: { type: 'boolean' },
+      }, required: ['name'],
+    },
+  },
+  {
+    name: 'db_begin_transaction', description: '开始事务',
+    inputSchema: { type: 'object', properties: { transactionId: { type: 'string' } } },
+  },
+  {
+    name: 'db_commit_transaction', description: '提交事务',
+    inputSchema: { type: 'object', properties: { transactionId: { type: 'string' } }, required: ['transactionId'] },
+  },
+  {
+    name: 'db_rollback_transaction', description: '回滚事务',
+    inputSchema: { type: 'object', properties: { transactionId: { type: 'string' } }, required: ['transactionId'] },
+  },
+  {
+    name: 'db_transaction_execute', description: '在事务中执行 SQL',
+    inputSchema: {
+      type: 'object', properties: {
+        transactionId: { type: 'string' }, sql: { type: 'string' },
+        params: { type: 'array', items: { type: ['string', 'number', 'boolean', 'null'] } },
+      }, required: ['transactionId', 'sql'],
+    },
+  },
+  {
+    name: 'db_batch_execute', description: '批量执行 SQL',
+    inputSchema: {
+      type: 'object', properties: {
+        sql: { type: 'string' },
+        paramsList: { type: 'array', items: { type: 'array' } },
+        autoCommit: { type: 'boolean' },
+      }, required: ['sql', 'paramsList'],
+    },
+  },
+  {
+    name: 'db_batch_insert', description: '批量插入数据',
+    inputSchema: {
+      type: 'object', properties: {
+        table: { type: 'string' }, columns: { type: 'array', items: { type: 'string' } },
+        values: { type: 'array', items: { type: 'array' } }, autoCommit: { type: 'boolean' },
+      }, required: ['table', 'columns', 'values'],
+    },
+  },
+  {
+    name: 'db_list_tables', description: '获取表列表',
+    inputSchema: { type: 'object', properties: { schema: { type: 'string' }, pattern: { type: 'string' } } },
+  },
+  {
+    name: 'db_get_table_schema', description: '获取表结构',
+    inputSchema: { type: 'object', properties: { tableName: { type: 'string' }, schema: { type: 'string' } }, required: ['tableName'] },
+  },
+];
+
+// ==================== 权限控制 ====================
+
+type Permission = 'read' | 'insert' | 'update' | 'delete' | 'ddl' | 'procedure' | 'transaction' | 'batch';
+const TOOL_PERMS: Record<string, Permission> = {
+  db_query: 'read', db_list_tables: 'read', db_get_table_schema: 'read',
+  db_execute: 'ddl', db_procedure: 'procedure',
+  db_begin_transaction: 'transaction', db_commit_transaction: 'transaction',
+  db_rollback_transaction: 'transaction', db_transaction_execute: 'transaction',
+  db_batch_execute: 'batch', db_batch_insert: 'batch',
 };
 
-/**
- * 从 SQL 语句推断操作类型
- */
 function inferSqlType(sql: string): 'insert' | 'update' | 'delete' | 'ddl' | 'other' {
-  const trimmed = sql.trim().toUpperCase();
-  if (trimmed.startsWith('INSERT')) return 'insert';
-  if (trimmed.startsWith('UPDATE')) return 'update';
-  if (trimmed.startsWith('DELETE')) return 'delete';
-  if (trimmed.startsWith('CREATE') || trimmed.startsWith('ALTER') || trimmed.startsWith('DROP') || trimmed.startsWith('TRUNCATE')) return 'ddl';
+  const t = sql.trim().toUpperCase();
+  if (t.startsWith('INSERT')) return 'insert';
+  if (t.startsWith('UPDATE')) return 'update';
+  if (t.startsWith('DELETE')) return 'delete';
+  if (/^(CREATE|ALTER|DROP|TRUNCATE)/.test(t)) return 'ddl';
   return 'other';
 }
 
-/**
- * 检查权限是否被允许
- */
-function checkPermission(perm: Permission, security: ReturnType<typeof getSecurityConfig>): boolean {
-  switch (perm) {
-    case 'read': return true;
-    case 'insert': return security.allowInsert;
-    case 'update': return security.allowUpdate;
-    case 'delete': return security.allowDelete;
-    case 'ddl': return security.allowInsert && security.allowUpdate && security.allowDelete;
-    case 'procedure': return security.allowInsert || security.allowUpdate || security.allowDelete;
-    case 'transaction': return security.allowInsert || security.allowUpdate || security.allowDelete;
+function checkDmlPerm(sqlType: 'insert' | 'update' | 'delete' | 'ddl', s: ReturnType<typeof getSecurityConfig>): boolean {
+  switch (sqlType) {
+    case 'insert': return s.allowInsert;
+    case 'update': return s.allowUpdate;
+    case 'delete': return s.allowDelete;
+    case 'ddl': return s.allowDdl;
     default: return false;
   }
 }
 
-/**
- * 获取权限描述
- */
-function getPermissionLabel(perm: Permission): string {
-  const labels: Record<Permission, string> = {
-    read: '读取',
-    insert: 'INSERT',
-    update: 'UPDATE',
-    delete: 'DELETE',
-    ddl: 'DDL',
-    procedure: '存储过程',
-    transaction: '事务',
-  };
-  return labels[perm];
+function checkPerm(p: Permission, s: ReturnType<typeof getSecurityConfig>): boolean {
+  switch (p) {
+    case 'read': return true;
+    case 'insert': return s.allowInsert;
+    case 'update': return s.allowUpdate;
+    case 'delete': return s.allowDelete;
+    case 'ddl': return s.allowDdl;
+    case 'procedure': return s.allowProcedure;
+    case 'transaction': return s.allowTransaction;
+    case 'batch': return s.allowBatch;
+    default: return false;
+  }
 }
 
-/**
- * 注册工具列表处理器
- */
+function permLabel(p: Permission): string {
+  return { read: '读取', insert: 'INSERT', update: 'UPDATE', delete: 'DELETE', ddl: 'DDL', procedure: '存储过程', transaction: '事务', batch: '批量操作' }[p];
+}
+
+// ==================== 工具注册 ====================
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  const security = getSecurityConfig();
-
-  const allTools = [
-    queryTool,
-    executeTool,
-    procedureTool,
-    transactionTools.begin,
-    transactionTools.commit,
-    transactionTools.rollback,
-    transactionTools.execute,
-    batchTools.execute,
-    batchTools.insert,
-    schemaTools.listTables,
-    schemaTools.getTableSchema,
-  ];
-
-  // 根据权限过滤工具
-  const tools = allTools.filter(t => {
-    const perm = TOOL_PERMISSIONS[t.name];
-    if (!perm) return true;
-    return checkPermission(perm, security);
-  });
-
-  return { tools };
+  const s = getSecurityConfig();
+  return { tools: tools.filter(t => checkPerm(TOOL_PERMS[t.name], s)) };
 });
 
-/**
- * 注册工具调用处理器
- */
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+  if (!adapter) return { content: [{ type: 'text', text: '错误: 数据库未连接' }], isError: true };
 
-  // 安全校验
-  const perm = TOOL_PERMISSIONS[name];
+  // 权限检查
+  const perm = TOOL_PERMS[name];
   if (perm && perm !== 'read') {
-    const security = getSecurityConfig();
-
-    // oracle_execute 和 oracle_batch_execute 需要根据 SQL 类型动态判断
-    if (name === 'oracle_execute' || name === 'oracle_batch_execute') {
-      const sql = (args as { sql: string }).sql;
-      const sqlType = inferSqlType(sql);
-      if (sqlType === 'insert' && !security.allowInsert) {
-        return { content: [{ type: 'text', text: `错误: 当前禁止 INSERT 操作。如需启用，请设置 ORACLE_ALLOW_INSERT=true` }], isError: true };
+    const s = getSecurityConfig();
+    const prefix = getDbType().toUpperCase();
+    if (name === 'db_execute' || name === 'db_batch_execute') {
+      const sqlType = inferSqlType((args as any).sql);
+      if (sqlType !== 'other' && !checkDmlPerm(sqlType, s)) {
+        return { content: [{ type: 'text', text: `错误: 当前禁止 ${sqlType.toUpperCase()} 操作。请设置 DB_${prefix}_ALLOW_${sqlType.toUpperCase()}=true` }], isError: true };
       }
-      if (sqlType === 'update' && !security.allowUpdate) {
-        return { content: [{ type: 'text', text: `错误: 当前禁止 UPDATE 操作。如需启用，请设置 ORACLE_ALLOW_UPDATE=true` }], isError: true };
+    } else if (name === 'db_transaction_execute') {
+      const sqlType = inferSqlType((args as any).sql);
+      if (sqlType !== 'other' && !checkDmlPerm(sqlType, s)) {
+        return { content: [{ type: 'text', text: `错误: 当前禁止事务内执行 ${sqlType.toUpperCase()} 操作。请设置 DB_${prefix}_ALLOW_${sqlType.toUpperCase()}=true 和 DB_${prefix}_ALLOW_TRANSACTION=true` }], isError: true };
+      } else if (!checkPerm(perm, s)) {
+        return { content: [{ type: 'text', text: `错误: 当前禁止${permLabel(perm)}操作。请设置 DB_${prefix}_ALLOW_TRANSACTION=true` }], isError: true };
       }
-      if (sqlType === 'delete' && !security.allowDelete) {
-        return { content: [{ type: 'text', text: `错误: 当前禁止 DELETE 操作。如需启用，请设置 ORACLE_ALLOW_DELETE=true` }], isError: true };
-      }
-      if (sqlType === 'ddl' && !(security.allowInsert && security.allowUpdate && security.allowDelete)) {
-        return { content: [{ type: 'text', text: `错误: 当前禁止 DDL 操作（CREATE/ALTER/DROP/TRUNCATE）。如需启用，请同时设置 ORACLE_ALLOW_INSERT、ORACLE_ALLOW_UPDATE、ORACLE_ALLOW_DELETE=true` }], isError: true };
-      }
-    } else if (!checkPermission(perm, security)) {
-      return {
-        content: [{
-          type: 'text',
-          text: `错误: 当前禁止${getPermissionLabel(perm)}操作（${name}）。` +
-            (perm === 'insert' ? '请设置 ORACLE_ALLOW_INSERT=true' :
-             perm === 'update' ? '请设置 ORACLE_ALLOW_UPDATE=true' :
-             perm === 'delete' ? '请设置 ORACLE_ALLOW_DELETE=true' :
-             perm === 'procedure' ? '请至少设置一项写权限（ORACLE_ALLOW_INSERT/UPDATE/DELETE=true）' :
-             perm === 'transaction' ? '请至少设置一项写权限（ORACLE_ALLOW_INSERT/UPDATE/DELETE=true）' :
-             ''),
-        }],
-        isError: true,
-      };
+    } else if (!checkPerm(perm, s)) {
+      return { content: [{ type: 'text', text: `错误: 当前禁止${permLabel(perm)}操作。请设置 DB_${prefix}_ALLOW_${perm.toUpperCase()}=true` }], isError: true };
     }
   }
 
   try {
+    const a = args as any;
     switch (name) {
-      // 查询工具
-      case 'oracle_query': {
-        const result = await executeQuery(args as { sql: string; params?: (string | number | boolean | null)[]; maxRows?: number });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_query': {
+        const r = await adapter.query(a.sql, a.params, a.maxRows);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
-      // 执行工具
-      case 'oracle_execute': {
-        const result = await executeDML(args as { sql: string; params?: (string | number | boolean | null)[]; autoCommit?: boolean });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_execute': {
+        const r = await adapter.execute(a.sql, a.params, a.autoCommit ?? true);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
-      // 存储过程工具
-      case 'oracle_procedure': {
-        const result = await callProcedure(args as { name: string; params?: Array<{ name: string; direction: 'IN' | 'OUT' | 'IN OUT'; type?: string; value?: string | number | boolean | null }>; hasCursor?: boolean });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_procedure': {
+        const r = await adapter.callProcedure(a.name, a.params, a.hasCursor);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
-      // 事务工具
-      case 'oracle_begin_transaction': {
-        const result = await beginTransaction(args as { transactionId?: string });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_begin_transaction': {
+        const id = a.transactionId || `tx_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const conn = await adapter.getTransactionConnection();
+        activeTransactions.set(id, { connection: conn, startTime: new Date() });
+        return { content: [{ type: 'text', text: JSON.stringify({ transactionId: id }) }] };
       }
-
-      case 'oracle_commit_transaction': {
-        const result = await commitTransaction(args as { transactionId: string });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_commit_transaction': {
+        const tx = activeTransactions.get(a.transactionId);
+        if (!tx) throw new Error(`事务 "${a.transactionId}" 不存在`);
+        await adapter.commitTransaction(tx.connection);
+        activeTransactions.delete(a.transactionId);
+        return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
       }
-
-      case 'oracle_rollback_transaction': {
-        const result = await rollbackTransaction(args as { transactionId: string });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_rollback_transaction': {
+        const tx = activeTransactions.get(a.transactionId);
+        if (!tx) throw new Error(`事务 "${a.transactionId}" 不存在`);
+        await adapter.rollbackTransaction(tx.connection);
+        activeTransactions.delete(a.transactionId);
+        return { content: [{ type: 'text', text: JSON.stringify({ success: true }) }] };
       }
-
-      case 'oracle_transaction_execute': {
-        const result = await executeInTransaction(args as { transactionId: string; sql: string; params?: (string | number | boolean | null)[] });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_transaction_execute': {
+        const tx = activeTransactions.get(a.transactionId);
+        if (!tx) throw new Error(`事务 "${a.transactionId}" 不存在`);
+        const r = await adapter.executeInTransaction(tx.connection, a.sql, a.params);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
-      // 批量操作工具
-      case 'oracle_batch_execute': {
-        const result = await batchExecute(args as { sql: string; paramsList: (string | number | boolean | null)[][]; batchSize?: number; autoCommit?: boolean });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_batch_execute': {
+        const r = await adapter.batchExecute(a.sql, a.paramsList, a.autoCommit ?? true);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
-      case 'oracle_batch_insert': {
-        const result = await batchInsert(args as { table: string; columns: string[]; values: (string | number | boolean | null)[][]; batchSize?: number; autoCommit?: boolean });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_batch_insert': {
+        const cols = a.columns.map((_: string, i: number) => `$${i + 1}`).join(', ');
+        const sql = `INSERT INTO ${adapter.escapeIdentifier(a.table)} (${a.columns.join(', ')}) VALUES (${cols})`;
+        const r = await adapter.batchExecute(sql, a.values, a.autoCommit ?? true);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
-      // 数据库结构工具
-      case 'oracle_list_tables': {
-        const result = await listTables(args as { schema?: string; tableNamePattern?: string });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_list_tables': {
+        const r = await adapter.listTables(a.schema, a.pattern);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
-      case 'oracle_get_table_schema': {
-        const result = await getTableSchema(args as { tableName: string; schema?: string });
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-        };
+      case 'db_get_table_schema': {
+        const r = await adapter.getTableSchema(a.tableName, a.schema);
+        return { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }] };
       }
-
       default:
         throw new Error(`未知工具: ${name}`);
     }
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
     return {
-      content: [
-        {
-          type: 'text',
-          text: `错误: ${errorMessage}`,
-        },
-      ],
+      content: [{ type: 'text', text: `错误: ${error instanceof Error ? error.message : String(error)}` }],
       isError: true,
     };
   }
 });
 
-/**
- * 主函数
- */
+// ==================== 启动 ====================
+
 async function main() {
   try {
-    // 从环境变量获取配置并初始化连接池
-    const config = getConfigFromEnv();
-    await initializePool(config);
+    const config = getConfig();
+    const dbType = config.db.type;
 
-    // 创建 stdio 传输层
+    console.error(`[DB MCP] 启动中... 数据库类型: ${dbType}`);
+    console.error(`[DB MCP] 支持的数据库: ${getSupportedDatabases().join(', ')}`);
+
+    adapter = createAdapter(dbType);
+    await adapter.initialize(config.db as Record<string, string>);
+
     const transport = new StdioServerTransport();
-    
-    // 连接服务器
     await server.connect(transport);
-    const security = getSecurityConfig();
+
+    const s = config.security;
     const perms: string[] = ['读取'];
-    if (security.allowInsert) perms.push('INSERT');
-    if (security.allowUpdate) perms.push('UPDATE');
-    if (security.allowDelete) perms.push('DELETE');
-    console.error(`[Oracle MCP] 服务器已启动，权限: ${perms.join(' / ')}`);
+    if (s.allowInsert) perms.push('INSERT');
+    if (s.allowUpdate) perms.push('UPDATE');
+    if (s.allowDelete) perms.push('DELETE');
+    if (s.allowDdl) perms.push('DDL');
+    if (s.allowProcedure) perms.push('存储过程');
+    if (s.allowTransaction) perms.push('事务');
+    if (s.allowBatch) perms.push('批量操作');
+    console.error(`[DB MCP] 服务器已启动 (${dbType})，权限: ${perms.join(' / ')}`);
 
-    // 处理进程退出
-    process.on('SIGINT', async () => {
-      console.error('[Oracle MCP] 正在关闭服务器...');
-      await cleanupTransactions();
-      await closePool();
+    const shutdown = async () => {
+      console.error('[DB MCP] 正在关闭...');
+      for (const [id, tx] of activeTransactions) {
+        try { await adapter!.rollbackTransaction(tx.connection); } catch {}
+      }
+      activeTransactions.clear();
+      await adapter!.close();
       process.exit(0);
-    });
-
-    process.on('SIGTERM', async () => {
-      console.error('[Oracle MCP] 正在关闭服务器...');
-      await cleanupTransactions();
-      await closePool();
-      process.exit(0);
-    });
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
   } catch (error) {
-    console.error('[Oracle MCP] 启动失败:', error);
+    console.error('[DB MCP] 启动失败:', error);
     process.exit(1);
   }
 }
 
-// 启动服务器
 main();

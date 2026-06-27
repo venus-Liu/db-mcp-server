@@ -1,7 +1,7 @@
 {
-  "name": "oracle-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP server for Oracle database operations",
+  "name": "db-mcp-server",
+  "version": "2.0.0",
+  "description": "MCP server for multi-database operations (Oracle, MySQL, PostgreSQL, SQL Server, SQLite)",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -13,6 +13,10 @@
   "keywords": [
     "mcp",
     "oracle",
+    "mysql",
+    "postgresql",
+    "sqlserver",
+    "sqlite",
     "database",
     "sql"
   ],
@@ -20,12 +24,21 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "oracledb": "^6.7.0",
+    "better-sqlite3": "^11.7.0",
+    "mssql": "^11.0.0",
+    "mysql2": "^3.12.0",
+    "pg": "^8.13.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/mssql": "^12.3.0",
     "@types/node": "^22.10.5",
     "@types/oracledb": "^6.5.0",
+    "@types/pg": "^8.11.0",
     "typescript": "^5.7.2"
+  },
+  "optionalDependencies": {
+    "oracledb": "^6.7.0"
   }
 }

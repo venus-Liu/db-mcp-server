@@ -1,87 +1,163 @@
 /**
  * 数据库连接配置管理模块
- * 支持从环境变量读取 Oracle 连接配置
+ * 支持从环境变量读取多数据库连接配置
+ * 环境变量命名格式: DB_<数据库类型>_配置名（如 DB_ORACLE_ALLOW_INSERT）
  */
 
-import oracledb from 'oracledb';
-
-// 初始化 Oracle 客户端（支持自定义路径）
-const oracleClientPath = process.env.ORACLE_CLIENT_PATH;
-if (oracleClientPath) {
-  oracledb.initOracleClient({ libDir: oracleClientPath });
-} else {
-  oracledb.initOracleClient();
-}
-
 /**
- * Oracle 连接配置接口
- */
-export interface OracleConfig {
-  user: string;
-  password: string;
-  connectString: string;
-  poolMin?: number;
-  poolMax?: number;
-  poolIncrement?: number;
-}
-
-/**
- * MCP 安全配置接口
+ * 安全配置接口
  */
 export interface McpSecurityConfig {
-  /** 是否允许 INSERT 操作，默认 false */
+  /** 是否允许 INSERT */
   allowInsert: boolean;
-  /** 是否允许 UPDATE 操作，默认 false */
+  /** 是否允许 UPDATE */
   allowUpdate: boolean;
-  /** 是否允许 DELETE 操作，默认 false */
+  /** 是否允许 DELETE */
   allowDelete: boolean;
+  /** 是否允许 DDL（CREATE/ALTER/DROP/TRUNCATE） */
+  allowDdl: boolean;
+  /** 是否允许存储过程/函数 */
+  allowProcedure: boolean;
+  /** 是否允许事务 */
+  allowTransaction: boolean;
+  /** 是否允许批量操作 */
+  allowBatch: boolean;
+}
+
+/**
+ * 数据库配置接口
+ */
+export interface DatabaseConfig {
+  type: string;
+  [key: string]: string | undefined;
+}
+
+/**
+ * MCP 服务器配置接口
+ */
+export interface McpConfig {
+  db: DatabaseConfig;
+  security: McpSecurityConfig;
+}
+
+/**
+ * 从环境变量获取数据库类型
+ */
+export function getDbType(): string {
+  return process.env.DB_TYPE || process.env.ORACLE_CONNECT_STRING ? 'oracle' : 'sqlite';
+}
+
+/**
+ * 获取数据库类型前缀（大写）
+ */
+function getDbPrefix(): string {
+  return getDbType().toUpperCase();
+}
+
+/**
+ * 读取带数据库类型前缀的环境变量
+ * 优先读取 DB_<TYPE>_KEY，其次 DB_KEY，最后 ORACLE_KEY（向后兼容）
+ */
+function getEnvWithPrefix(key: string): string | undefined {
+  const prefix = getDbPrefix();
+  return process.env[`DB_${prefix}_${key}`] || process.env[`DB_${key}`] || process.env[`ORACLE_${key}`];
+}
+
+/**
+ * 读取布尔类型的环境变量（'true' 为真）
+ */
+function getEnvBoolWithPrefix(key: string): boolean {
+  const prefix = getDbPrefix();
+  const specific = process.env[`DB_${prefix}_${key}`];
+  if (specific !== undefined) return specific === 'true';
+  const generic = process.env[`DB_${key}`];
+  if (generic !== undefined) return generic === 'true';
+  const legacy = process.env[`ORACLE_${key}`];
+  if (legacy !== undefined) return legacy === 'true';
+  return false;
 }
 
 /**
  * 获取安全配置
- * @returns McpSecurityConfig 安全配置对象
  */
 export function getSecurityConfig(): McpSecurityConfig {
   return {
-    allowInsert: process.env.ORACLE_ALLOW_INSERT === 'true',
-    allowUpdate: process.env.ORACLE_ALLOW_UPDATE === 'true',
-    allowDelete: process.env.ORACLE_ALLOW_DELETE === 'true',
+    allowInsert: getEnvBoolWithPrefix('ALLOW_INSERT'),
+    allowUpdate: getEnvBoolWithPrefix('ALLOW_UPDATE'),
+    allowDelete: getEnvBoolWithPrefix('ALLOW_DELETE'),
+    allowDdl: getEnvBoolWithPrefix('ALLOW_DDL'),
+    allowProcedure: getEnvBoolWithPrefix('ALLOW_PROCEDURE'),
+    allowTransaction: getEnvBoolWithPrefix('ALLOW_TRANSACTION'),
+    allowBatch: getEnvBoolWithPrefix('ALLOW_BATCH'),
   };
 }
 
 /**
- * 从环境变量获取配置
- * @returns OracleConfig 配置对象
+ * 从环境变量获取数据库连接配置
  */
-export function getConfigFromEnv(): OracleConfig {
-  const user = process.env.ORACLE_USER;
-  const password = process.env.ORACLE_PASSWORD;
-  const connectString = process.env.ORACLE_CONNECT_STRING;
+export function getDatabaseConfig(): DatabaseConfig {
+  const type = getDbType();
+  const config: DatabaseConfig = { type };
 
-  if (!user || !password || !connectString) {
-    throw new Error(
-      '缺少必需的 Oracle 连接配置。请设置以下环境变量：\n' +
-      '  - ORACLE_USER: 数据库用户名\n' +
-      '  - ORACLE_PASSWORD: 数据库密码\n' +
-      '  - ORACLE_CONNECT_STRING: 连接字符串 (如: localhost:1521/ORCL)'
-    );
+  switch (type) {
+    case 'oracle': {
+      config.user = getEnvWithPrefix('USER') || '';
+      config.password = getEnvWithPrefix('PASSWORD') || '';
+      config.connectString = getEnvWithPrefix('CONNECT_STRING') || getEnvWithPrefix('HOST') || '';
+      config.clientPath = getEnvWithPrefix('CLIENT_PATH') || '';
+      config.poolMin = getEnvWithPrefix('POOL_MIN') || '2';
+      config.poolMax = getEnvWithPrefix('POOL_MAX') || '10';
+      config.poolIncrement = getEnvWithPrefix('POOL_INCREMENT') || '1';
+      if (!config.user || !config.password || !config.connectString) {
+        throw new Error('缺少 Oracle 连接配置。请设置 DB_ORACLE_USER, DB_ORACLE_PASSWORD, DB_ORACLE_CONNECT_STRING');
+      }
+      break;
+    }
+
+    case 'mysql':
+      config.host = getEnvWithPrefix('HOST') || 'localhost';
+      config.port = getEnvWithPrefix('PORT') || '3306';
+      config.user = getEnvWithPrefix('USER') || 'root';
+      config.password = getEnvWithPrefix('PASSWORD') || '';
+      config.database = getEnvWithPrefix('DATABASE') || '';
+      if (!config.database) throw new Error('缺少 MySQL 数据库名。请设置 DB_MYSQL_DATABASE');
+      break;
+
+    case 'postgresql':
+      config.host = getEnvWithPrefix('HOST') || 'localhost';
+      config.port = getEnvWithPrefix('PORT') || '5432';
+      config.user = getEnvWithPrefix('USER') || 'postgres';
+      config.password = getEnvWithPrefix('PASSWORD') || '';
+      config.database = getEnvWithPrefix('DATABASE') || '';
+      if (!config.database) throw new Error('缺少 PostgreSQL 数据库名。请设置 DB_POSTGRESQL_DATABASE');
+      break;
+
+    case 'sqlserver':
+      config.host = getEnvWithPrefix('HOST') || 'localhost';
+      config.port = getEnvWithPrefix('PORT') || '1433';
+      config.user = getEnvWithPrefix('USER') || 'sa';
+      config.password = getEnvWithPrefix('PASSWORD') || '';
+      config.database = getEnvWithPrefix('DATABASE') || '';
+      if (!config.database) throw new Error('缺少 SQL Server 数据库名。请设置 DB_SQLSERVER_DATABASE');
+      break;
+
+    case 'sqlite':
+      config.database = getEnvWithPrefix('DATABASE') || ':memory:';
+      break;
+
+    default:
+      throw new Error(`不支持的数据库类型: ${type}。支持: oracle, mysql, postgresql, sqlserver, sqlite`);
   }
 
-  return {
-    user,
-    password,
-    connectString,
-    poolMin: parseInt(process.env.ORACLE_POOL_MIN || '2', 10),
-    poolMax: parseInt(process.env.ORACLE_POOL_MAX || '10', 10),
-    poolIncrement: parseInt(process.env.ORACLE_POOL_INCREMENT || '1', 10),
-  };
+  return config;
 }
 
 /**
- * 默认配置
+ * 获取完整配置
  */
-export const defaultConfig: Partial<OracleConfig> = {
-  poolMin: 2,
-  poolMax: 10,
-  poolIncrement: 1,
-};
+export function getConfig(): McpConfig {
+  return {
+    db: getDatabaseConfig(),
+    security: getSecurityConfig(),
+  };
+}
