@@ -33,7 +33,7 @@ npm run build
 DB_TYPE=oracle          # oracle | mysql | postgresql | sqlserver | sqlite
 ```
 
-若未设置 `DB_TYPE`，但存在 `ORACLE_CONNECT_STRING`（旧变量兼容），则自动推断为 Oracle。
+若未设置 `DB_TYPE`，默认为 `sqlite`。
 
 ### 2. 连接配置
 
@@ -209,19 +209,6 @@ Oracle Instant Client 要求：
 | `db_get_table_schema` | 读取（默认允许） | 获取表结构（列、约束、索引） |
 
 > **注意：** 当某个权限关闭时，对应的工具不会出现在 MCP 工具列表中，客户端也无法调用。
-
-## 向后兼容
-
-旧版 `ORACLE_*` 环境变量仍然有效，但建议迁移到新格式：
-
-| 旧格式 | 新格式（推荐） |
-|--------|--------------|
-| `ORACLE_USER` | `DB_USER` |
-| `ORACLE_PASSWORD` | `DB_PASSWORD` |
-| `ORACLE_CONNECT_STRING` | `DB_CONNECT_STRING` |
-| `ORACLE_ALLOW_INSERT` | `DB_ALLOW_INSERT` |
-| `ORACLE_ALLOW_UPDATE` | `DB_ALLOW_UPDATE` |
-| `ORACLE_ALLOW_DELETE` | `DB_ALLOW_DELETE` |
 
 ## 项目结构
 

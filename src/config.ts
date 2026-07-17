@@ -45,25 +45,22 @@ export interface McpConfig {
  * 从环境变量获取数据库类型
  */
 export function getDbType(): string {
-  return process.env.DB_TYPE || process.env.ORACLE_CONNECT_STRING ? 'oracle' : 'sqlite';
+  return process.env.DB_TYPE || 'sqlite';
 }
 
 /**
- * 读取环境变量（DB_前缀，兼容 ORACLE_ 旧变量）
+ * 读取环境变量（DB_前缀）
  */
 function getEnv(key: string): string | undefined {
-  return process.env[`DB_${key}`] || process.env[`ORACLE_${key}`];
+  return process.env[`DB_${key}`];
 }
 
 /**
  * 读取布尔类型的环境变量（'true' 为真）
- * 兼容 ORACLE_ 旧变量
  */
 function getEnvBool(key: string): boolean {
   const value = process.env[`DB_${key}`];
   if (value !== undefined) return value === 'true';
-  const legacy = process.env[`ORACLE_${key}`];
-  if (legacy !== undefined) return legacy === 'true';
   return false;
 }
 
