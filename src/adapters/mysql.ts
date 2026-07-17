@@ -10,16 +10,17 @@ export class MySQLAdapter implements DatabaseAdapter {
   private pool: mysql.Pool | null = null;
 
   async initialize(config: Record<string, string>): Promise<void> {
-    this.pool = mysql.createPool({
+    const poolConfig: mysql.PoolOptions = {
       host: config.host || 'localhost',
       port: parseInt(config.port || '3306', 10),
       user: config.user,
       password: config.password,
-      database: config.database,
       waitForConnections: true,
       connectionLimit: 10,
       charset: 'utf8mb4',
-    });
+    };
+    if (config.database) poolConfig.database = config.database;
+    this.pool = mysql.createPool(poolConfig);
     console.error('[MySQL] 连接池创建成功');
   }
 

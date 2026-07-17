@@ -107,7 +107,6 @@ export function getDatabaseConfig(): DatabaseConfig {
       config.user = getEnv('USER') || 'root';
       config.password = getEnv('PASSWORD') || '';
       config.database = getEnv('DATABASE') || '';
-      if (!config.database) throw new Error('缺少 MySQL 数据库名。请设置 DB_DATABASE');
       break;
 
     case 'postgresql':
@@ -116,7 +115,6 @@ export function getDatabaseConfig(): DatabaseConfig {
       config.user = getEnv('USER') || 'postgres';
       config.password = getEnv('PASSWORD') || '';
       config.database = getEnv('DATABASE') || '';
-      if (!config.database) throw new Error('缺少 PostgreSQL 数据库名。请设置 DB_DATABASE');
       break;
 
     case 'sqlserver':
@@ -125,7 +123,6 @@ export function getDatabaseConfig(): DatabaseConfig {
       config.user = getEnv('USER') || 'sa';
       config.password = getEnv('PASSWORD') || '';
       config.database = getEnv('DATABASE') || '';
-      if (!config.database) throw new Error('缺少 SQL Server 数据库名。请设置 DB_DATABASE');
       break;
 
     case 'sqlite':
