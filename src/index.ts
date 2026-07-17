@@ -173,21 +173,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const perm = TOOL_PERMS[name];
   if (perm && perm !== 'read') {
     const s = getSecurityConfig();
-    const prefix = getDbType().toUpperCase();
     if (name === 'db_execute' || name === 'db_batch_execute') {
       const sqlType = inferSqlType((args as any).sql);
       if (sqlType !== 'other' && !checkDmlPerm(sqlType, s)) {
-        return { content: [{ type: 'text', text: `错误: 当前禁止 ${sqlType.toUpperCase()} 操作。请设置 DB_${prefix}_ALLOW_${sqlType.toUpperCase()}=true` }], isError: true };
+        return { content: [{ type: 'text', text: `错误: 当前禁止 ${sqlType.toUpperCase()} 操作。请设置 DB_ALLOW_${sqlType.toUpperCase()}=true` }], isError: true };
       }
     } else if (name === 'db_transaction_execute') {
       const sqlType = inferSqlType((args as any).sql);
       if (sqlType !== 'other' && !checkDmlPerm(sqlType, s)) {
-        return { content: [{ type: 'text', text: `错误: 当前禁止事务内执行 ${sqlType.toUpperCase()} 操作。请设置 DB_${prefix}_ALLOW_${sqlType.toUpperCase()}=true 和 DB_${prefix}_ALLOW_TRANSACTION=true` }], isError: true };
+        return { content: [{ type: 'text', text: `错误: 当前禁止事务内执行 ${sqlType.toUpperCase()} 操作。请设置 DB_ALLOW_${sqlType.toUpperCase()}=true 和 DB_ALLOW_TRANSACTION=true` }], isError: true };
       } else if (!checkPerm(perm, s)) {
-        return { content: [{ type: 'text', text: `错误: 当前禁止${permLabel(perm)}操作。请设置 DB_${prefix}_ALLOW_TRANSACTION=true` }], isError: true };
+        return { content: [{ type: 'text', text: `错误: 当前禁止${permLabel(perm)}操作。请设置 DB_ALLOW_TRANSACTION=true` }], isError: true };
       }
     } else if (!checkPerm(perm, s)) {
-      return { content: [{ type: 'text', text: `错误: 当前禁止${permLabel(perm)}操作。请设置 DB_${prefix}_ALLOW_${perm.toUpperCase()}=true` }], isError: true };
+      return { content: [{ type: 'text', text: `错误: 当前禁止${permLabel(perm)}操作。请设置 DB_ALLOW_${perm.toUpperCase()}=true` }], isError: true };
     }
   }
 
