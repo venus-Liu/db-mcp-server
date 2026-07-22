@@ -117,51 +117,62 @@ export class MySQLAdapter implements DatabaseAdapter {
     const conn = await this.getConnection() as mysql.PoolConnection;
     try {
       const db = schema || (await conn.query('SELECT DATABASE() as db') as any[])[0][0].db;
+      const fullTable = schema ? `\`${schema}\`.\`${tableName}\`` : `\`${tableName}\``;
 
-      // 列信息
-      const [cols] = await conn.query(
-        `SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
-                IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT
-         FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`,
-        [db, tableName]
-      );
+      // 列信息（SHOW COLUMNS 兼容所有 MySQL 版本）
+      const [cols] = await conn.query(`SHOW COLUMNS FROM ${fullTable}`);
       const columns = (cols as any[]).map(c => ({
-        columnName: c.COLUMN_NAME, dataType: c.DATA_TYPE,
-        dataLength: c.CHARACTER_MAXIMUM_LENGTH || undefined,
-        dataPrecision: c.NUMERIC_PRECISION || undefined, dataScale: c.NUMERIC_SCALE || undefined,
-        nullable: c.IS_NULLABLE === 'YES', dataDefault: c.COLUMN_DEFAULT || undefined,
-        comments: c.COLUMN_COMMENT || undefined,
+        columnName: c.Field,
+        dataType: c.Type,
+        nullable: c.Null === 'YES',
+        dataDefault: c.Default ?? undefined,
+        comments: c.Comment || undefined,
       }));
 
-      // 约束信息
-      const [constraints] = await conn.query(
-        `SELECT c.CONSTRAINT_NAME, c.CONSTRAINT_TYPE, k.COLUMN_NAME, c.CHECK_CLAUSE,
-                k.REFERENCED_TABLE_NAME
-         FROM information_schema.TABLE_CONSTRAINTS c
-         LEFT JOIN information_schema.KEY_COLUMN_USAGE k ON c.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND c.TABLE_SCHEMA = k.TABLE_SCHEMA
-         WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ? ORDER BY c.CONSTRAINT_NAME`,
-        [db, tableName]
-      );
-      const constraintList = (constraints as any[]).map(c => ({
-        constraintName: c.CONSTRAINT_NAME, constraintType: c.CONSTRAINT_TYPE,
-        columnName: c.COLUMN_NAME || undefined, searchCondition: c.CHECK_CLAUSE || undefined,
-        rTableName: c.REFERENCED_TABLE_NAME || undefined,
-      }));
+      // 约束信息（用 SHOW CREATE TABLE 解析，兼容所有版本）
+      const [createResult] = await conn.query(`SHOW CREATE TABLE ${fullTable}`);
+      const createSql = (createResult as any[])[0]['Create Table'] || '';
+      const constraints: { constraintName: string; constraintType: string; columnName?: string; rTableName?: string }[] = [];
+      // 解析主键
+      const pkMatch = createSql.match(/PRIMARY KEY\s*\(([^)]+)\)/i);
+      if (pkMatch) {
+        const pkCols = pkMatch[1].split(',').map((s: string) => s.trim().replace(/`/g, ''));
+        for (const col of pkCols) {
+          constraints.push({ constraintName: 'PRIMARY', constraintType: 'PRIMARY KEY', columnName: col });
+        }
+      }
+      // 解析外键
+      const fkRegex = /CONSTRAINT\s+`([^`]+)`\s+FOREIGN KEY\s*\(([^)]+)\)\s+REFERENCES\s+`([^`]+)`/gi;
+      let fkMatch;
+      while ((fkMatch = fkRegex.exec(createSql)) !== null) {
+        const fkCols = fkMatch[2].split(',').map(s => s.trim().replace(/`/g, ''));
+        for (const col of fkCols) {
+          constraints.push({ constraintName: fkMatch[1], constraintType: 'FOREIGN KEY', columnName: col, rTableName: fkMatch[3] });
+        }
+      }
+      // 解析唯一键
+      const ukRegex = /UNIQUE KEY\s+`([^`]+)`\s*\(([^)]+)\)/gi;
+      let ukMatch;
+      while ((ukMatch = ukRegex.exec(createSql)) !== null) {
+        const ukCols = ukMatch[2].split(',').map(s => s.trim().replace(/`/g, ''));
+        for (const col of ukCols) {
+          constraints.push({ constraintName: ukMatch[1], constraintType: 'UNIQUE', columnName: col });
+        }
+      }
 
-      // 索引信息
-      const [indexes] = await conn.query(
-        `SELECT INDEX_NAME, NON_UNIQUE, COLUMN_NAME FROM information_schema.STATISTICS
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME != 'PRIMARY'
-         ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
-        [db, tableName]
-      );
+      // 索引信息（SHOW INDEX 兼容所有版本）
+      const [idxRows] = await conn.query(`SHOW INDEX FROM ${fullTable}`);
       const indexMap = new Map<string, { indexName: string; uniqueness: string; columns: string[] }>();
-      (indexes as any[]).forEach(r => {
-        if (!indexMap.has(r.INDEX_NAME)) indexMap.set(r.INDEX_NAME, { indexName: r.INDEX_NAME, uniqueness: r.NON_UNIQUE ? 'NONUNIQUE' : 'UNIQUE', columns: [] });
-        indexMap.get(r.INDEX_NAME)!.columns.push(r.COLUMN_NAME);
+      (idxRows as any[]).forEach(r => {
+        const idxName = r.Key_name;
+        if (idxName === 'PRIMARY') return;
+        if (!indexMap.has(idxName)) {
+          indexMap.set(idxName, { indexName: idxName, uniqueness: r.Non_unique ? 'NONUNIQUE' : 'UNIQUE', columns: [] });
+        }
+        indexMap.get(idxName)!.columns.push(r.Column_name);
       });
 
-      return { tableName, columns, constraints: constraintList, indexes: Array.from(indexMap.values()) };
+      return { tableName, columns, constraints, indexes: Array.from(indexMap.values()) };
     } finally {
       conn.release();
     }
